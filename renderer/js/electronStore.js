@@ -23,7 +23,10 @@ const addALink = (link) => {
     //添加一个连接，如果本地存了，就更新，没存新增
     let links = getLinks()
     for (let i = 0; i < links.length; i++) {
-        if (link.host === links[i].host && link.port === links[i].port) {
+        const oldDriver = links[i].driver === 'iotdb' ? 'iotdb' : 'native'
+        const newDriver = link.driver === 'iotdb' ? 'iotdb' : 'native'
+        const sameModel = oldDriver !== 'iotdb' || (links[i].model || 'tree') === (link.model || 'tree')
+        if (link.host === links[i].host && link.port === links[i].port && oldDriver === newDriver && sameModel) {
             //更新
             links[i] = link
             return setLinks(links)

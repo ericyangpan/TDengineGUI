@@ -7,6 +7,9 @@
 - Link to TDengine, create and drop databases
 - show tables and surpertables, select data.
 - execute the SQL statements using a simple console.
+- Connect to Apache IoTDB 2.x in Tree or Table mode over REST, browse devices/tables and inspect metadata.
+
+See [IoTDB support](IOTDB.md) for REST setup, model-specific behavior, and known limitations.
 
 ## Downloads
 

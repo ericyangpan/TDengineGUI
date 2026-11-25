@@ -1,4 +1,5 @@
 const TaosRestful = require('./taosrestful_.js')
+const IoTDBRestful = require('./iotdbRestful.js')
 require('./electronStore.js')
 const {TouchBarScrubber} = require('electron')
 
@@ -23,10 +24,14 @@ new Vue({
             addOrEditTitle: '新建连接',
             linkForm: {
                 name: "",
+                driver: "native",
+                model: "tree",
+                protocol: "http",
                 host: "",
-                port: "",
+                port: "6041",
                 user: "",
                 password: "",
+                timeout: 10,
             },
             activeTab: "1",
 
@@ -97,6 +102,11 @@ new Vue({
             SuperTdialogText: "",
             Tdialog: false,
             TdialogText: "",
+            metadataDialog: false,
+            metadataTitle: "",
+            metadataRows: [],
+            metadataColumns: [],
+            loadingMetadata: false,
 
             surperTorder: "ASC",
             Torder: "ASC",
@@ -108,7 +118,44 @@ new Vue({
             }
         }
     },
+    computed: {
+        isIoTDB() {
+            return this.theLink && this.theLink.driver === 'iotdb'
+        },
+        isIoTDBTree() {
+            return this.isIoTDB && this.theLink.model !== 'table'
+        },
+        addingIoTDB() {
+            const link = this.links[this.addDBDialogLinkKey]
+            return !!link && link.driver === 'iotdb'
+        },
+        addingIoTDBTree() {
+            const link = this.links[this.addDBDialogLinkKey]
+            return !!link && link.driver === 'iotdb' && link.model !== 'table'
+        }
+    },
     methods: {
+        clientFor(link) {
+            return link && link.driver === 'iotdb' ? IoTDBRestful : TaosRestful
+        },
+        makePayload(link) {
+            return {
+                ip: link.host,
+                host: link.host,
+                port: link.port,
+                user: link.user,
+                password: link.password,
+                driver: link.driver === 'iotdb' ? 'iotdb' : 'native',
+                model: link.model || 'tree',
+                protocol: link.protocol || 'http',
+                timeout: Number(link.timeout || 10) * 1000
+            }
+        },
+        changeDriver(driver) {
+            this.linkForm.port = driver === 'iotdb' ? '18080' : '6041'
+            this.linkForm.model = 'tree'
+            this.linkForm.protocol = 'http'
+        },
         beforeClosedrawer() {
             if (this.theDB) {
                 this.drawer = false
@@ -129,10 +176,14 @@ new Vue({
             //清空表单
             this.linkForm = {
                 name: "",
+                driver: "native",
+                model: "tree",
+                protocol: "http",
                 host: "",
-                port: "",
+                port: "6041",
                 user: "",
-                password: ""
+                password: "",
+                timeout: 10,
             }
         },
         formatBoolean(data) {
@@ -154,47 +205,32 @@ new Vue({
                 duration: 500
             });
         },
-        confirmAddLink(event) {
-            //新建连接，先连接，如果成功，将payload+name记入本地
-            //var tr = new TaosRestful("121.36.56.117","6041","root","msl110918")
-            let payload = {
-                ip: this.linkForm.host,
-                port: this.linkForm.port,
-                user: this.linkForm.user,
-                password: this.linkForm.password
+        async confirmAddLink() {
+            const link = { ...this.linkForm, timeout: Number(this.linkForm.timeout || 10) }
+            if (!link.name || !link.host || !link.port || !link.user || link.password === '') {
+                this.$message({ message: '请填写连接名称、主机、端口和认证信息', type: 'warning', duration: 1500 })
+                return
             }
-            TaosRestful.showDatabases(payload).then(data => {
-                    //处理返回的数据库数据
-                    if (data.res) {
-
-                        TaosRestful.getVersion(payload).then(_data => {
-                            //连接成功，保存到本地
-                            this.$electronStore.addALink({
-                                name: this.linkForm.name,
-                                host: this.linkForm.host,
-                                port: this.linkForm.port,
-                                user: this.linkForm.user,
-                                password: this.linkForm.password,
-                                version: _data
-                            })
-                            //更新连接列表
-                            this.links = this.$electronStore.getLinks()
-                            //关闭新建连接的弹窗
-                            this.addLinkDialog = false
-                            this.addOrEditTitle = '新建连接'
-                            //清空表单
-                            this.clearLinkForm();
-                        })
-                    } else {
-                        //连接失败
-                        this.$message({
-                            message: '连接失败',
-                            type: 'error',
-                            duration: 1000
-                        });
-                    }
+            const client = this.clientFor(link)
+            const payload = this.makePayload(link)
+            this.loadingLinks = true
+            try {
+                const result = await client.showDatabases(payload)
+                if (!result.res) {
+                    this.$message({ message: result.msg || '连接失败', type: 'error', duration: 2000 })
+                    return
                 }
-            )
+                const version = await client.getVersion(payload)
+                this.$electronStore.addALink({ ...link, version, dbs: result.data })
+                this.links = this.$electronStore.getLinks()
+                this.addLinkDialog = false
+                this.addOrEditTitle = '新建连接'
+                this.clearLinkForm()
+            } catch (error) {
+                this.$message({ message: error.message || '连接失败', type: 'error', duration: 2000 })
+            } finally {
+                this.loadingLinks = false
+            }
         },
         deleteLink(key, linkName) {
             this.$confirm('确认删除连接' + linkName + "吗？")
@@ -208,17 +244,14 @@ new Vue({
                     });
                 })
         },
-        freshDB(key) {
-            let _this = this;
-            let theLink = this.links[key]
-            let payload = {
-                ip: theLink.host,
-                port: theLink.port,
-                user: theLink.user,
-                password: theLink.password
-            }
+        async freshDB(key) {
+            const theLink = this.links[key]
+            if (!theLink) return
+            const client = this.clientFor(theLink)
+            const payload = this.makePayload(theLink)
             this.loadingLinks = true
-            TaosRestful.showDatabases(payload).then(data => {
+            try {
+                const data = await client.showDatabases(payload)
                 this.loadingLinks = false
                 if (data.res) {
                     this.$message({
@@ -227,33 +260,21 @@ new Vue({
                         duration: 1000
                     });
                     this.links[key].dbs = data.data
-
-                    TaosRestful.getVersion(payload).then(data => {
-                        theLink.version = data
-                        _this.$data.links[key] = theLink
-                        if (TaosRestful.compareVersion(data, theLink.version)) {
-                            this.$electronStore.addALink({
-                                name: theLink.name,
-                                host: theLink.host,
-                                port: theLink.port,
-                                user: theLink.user,
-                                password: theLink.password,
-                                version: data
-                            })
-                        }
-                    })
-
-                    //TODO展开菜单
-
+                    theLink.version = await client.getVersion(payload)
+                    theLink.dbs = data.data
+                    this.$electronStore.addALink(theLink)
                 } else {
-                    //连接失败，直接提示
                     this.$message({
-                        message: "连接失败，请稍后重试",
+                        message: data.msg || '连接失败，请检查地址、认证和 REST 服务状态',
                         type: 'error',
-                        duration: 1000
+                        duration: 2000
                     });
                 }
-            })
+            } catch (error) {
+                this.$message({ message: error.message || '连接失败', type: 'error', duration: 2000 })
+            } finally {
+                this.loadingLinks = false
+            }
         },
         addDB(key) {
             this.addDBDialogLinkKey = key
@@ -268,28 +289,28 @@ new Vue({
             this.addDBblocks = 6
         },
         editDB(key) {
-            let theLink = this.links[key]
+            const theLink = this.links[key]
             this.linkForm = {
                 name: theLink.name,
+                driver: theLink.driver === 'iotdb' ? 'iotdb' : 'native',
+                model: theLink.model || 'tree',
+                protocol: theLink.protocol || 'http',
                 host: theLink.host,
                 port: theLink.port,
                 user: theLink.user,
                 password: theLink.password,
+                timeout: Number(theLink.timeout || 10),
             }
             this.addOrEditTitle = '编辑连接'
             this.addLinkDialog = true
         },
         postaddDB() {
-            let key = this.addDBDialogLinkKey
-            let theLink = this.links[key]
-            let payload = {
-                ip: theLink.host,
-                port: theLink.port,
-                user: theLink.user,
-                password: theLink.password
-            }
+            const key = this.addDBDialogLinkKey
+            const theLink = this.links[key]
+            const payload = this.makePayload(theLink)
+            const client = this.clientFor(theLink)
             if (this.addDBname) {
-                if (this.addDBreplica && this.addDBquorum) {
+                if (theLink.driver !== 'iotdb' && this.addDBreplica && this.addDBquorum) {
                     if (this.addDBreplica < this.addDBquorum) {
                         this.$message({
                             message: 'replica应大于等于quorum',
@@ -299,9 +320,12 @@ new Vue({
                         return
                     }
                 }
-                TaosRestful.createDatabase(this.addDBname, payload, safe = true, keep = this.addDBkeep,
-                    update = this.addDBupdate, comp = this.addDBcomp, replica = this.addDBreplica,
-                    quorum = this.addDBquorum, blocks = this.addDBblocks, theLink.version).then(data => {
+                const createDatabase = theLink.driver === 'iotdb'
+                    ? client.createDatabase(this.addDBname, payload)
+                    : client.createDatabase(this.addDBname, payload, true, this.addDBkeep,
+                        this.addDBupdate, this.addDBcomp, this.addDBreplica,
+                        this.addDBquorum, this.addDBblocks, theLink.version)
+                createDatabase.then(data => {
                     if (data.res) {
                         //新增成功
                         this.$message({
@@ -331,15 +355,9 @@ new Vue({
         deleteDB(link, dbName, key) {
             this.$confirm('确认删除数据库' + dbName + "吗？")
                 .then(_ => {
-                    let payload = {
-                        ip: link.host,
-                        port: link.port,
-                        user: link.user,
-                        password: link.password
-                    }
+                    const payload = this.makePayload(link)
                     this.loadingLinks = true
-
-                    TaosRestful.dropDatabase(dbName, payload).then(data => {
+                    this.clientFor(link).dropDatabase(dbName, payload).then(data => {
 
                         if (data.res) {
                             //成功
@@ -389,33 +407,29 @@ new Vue({
         },
         alartDB(link, dbName) {
             //切换数据库前先清空表
-            this.dbInfo = this.makeDbInfo(link.dbs, dbName)
+            this.theLink = link
+            this.theDB = dbName
+            this.dbInfo = link.driver === 'iotdb'
+                ? `Database: ${dbName}\nModel: ${link.model === 'table' ? 'Table' : 'Tree'}\nREST API: ${link.model === 'table' ? '/rest/table/v1' : '/rest/v2'}`
+                : this.makeDbInfo(link.dbs || [], dbName)
             this.surperTables = []
             this.clearSurperTable()
             this.tables = []
             this.clearTable()
 
             //记录进入的数据库
-            this.theLink = link
-            this.theDB = dbName
-
-            //更新超级表页
             this.drawer = false
-            this.activeTab = "1"
-            this.freshSurperTables()
+            this.activeTab = link.driver === 'iotdb' ? '2' : '1'
+            if (link.driver === 'iotdb') this.freshTables()
+            else this.freshSurperTables()
         },
         searchSurperTList() {
             this.SuperTdialog = false
             this.surperTables = []
             this.clearSurperTable()
-            let payload = {
-                ip: this.theLink.host,
-                port: this.theLink.port,
-                user: this.theLink.user,
-                password: this.theLink.password
-            }
+            const payload = this.makePayload(this.theLink)
             this.loadingSurperList = true
-            TaosRestful.showSuperTables(this.theDB, payload, like = this.SuperTdialogText).then(data => {
+            this.clientFor(this.theLink).showSuperTables(this.theDB, payload, like = this.SuperTdialogText).then(data => {
                 if (data.res) {
                     //拉取超级表成功
                     this.$message({
@@ -447,14 +461,9 @@ new Vue({
             this.tables = []
             this.clearTable()
 
-            let payload = {
-                ip: this.theLink.host,
-                port: this.theLink.port,
-                user: this.theLink.user,
-                password: this.theLink.password
-            }
+            const payload = this.makePayload(this.theLink)
             this.loadingTableList = true
-            TaosRestful.showTables(this.theDB, payload, like = this.TdialogText).then(data => {
+            this.clientFor(this.theLink).showTables(this.theDB, payload, like = this.TdialogText).then(data => {
                 if (data.res) {
                     //拉取表成功
                     this.$message({
@@ -511,14 +520,9 @@ new Vue({
             //清理选中的超级表和具体数据
             this.clearSurperTable()
 
-            let payload = {
-                ip: this.theLink.host,
-                port: this.theLink.port,
-                user: this.theLink.user,
-                password: this.theLink.password
-            }
+            const payload = this.makePayload(this.theLink)
             this.loadingSurperList = true
-            TaosRestful.showSuperTables(this.theDB, payload).then(data => {
+            this.clientFor(this.theLink).showSuperTables(this.theDB, payload).then(data => {
                 if (data.res) {
                     this.surperTables = data.data
                 } else {
@@ -537,14 +541,9 @@ new Vue({
             //清理选中的表和具体数据
             this.clearTable()
 
-            let payload = {
-                ip: this.theLink.host,
-                port: this.theLink.port,
-                user: this.theLink.user,
-                password: this.theLink.password
-            }
+            const payload = this.makePayload(this.theLink)
             this.loadingTableList = true
-            TaosRestful.showTables(this.theDB, payload).then(data => {
+            this.clientFor(this.theLink).showTables(this.theDB, payload).then(data => {
                 if (data.res) {
                     this.tables = data.data
                 } else {
@@ -560,8 +559,7 @@ new Vue({
         handleSwichTab(tab) {
             switch (tab.name) {
                 case "1":
-                    //超级表
-                    this.freshSurperTables()
+                    if (!this.isIoTDB) this.freshSurperTables()
                     break;
                 case "2":
                     //表
@@ -658,12 +656,7 @@ new Vue({
             }
 
             let offsetVal = (this.currentPageSurperTable - 1) * this.eachPageSurperTable
-            let payload = {
-                ip: this.theLink.host,
-                port: this.theLink.port,
-                user: this.theLink.user,
-                password: this.theLink.password
-            }
+            const payload = this.makePayload(this.theLink)
             this.loadingSurperTable = true
 
             //处理查询数据
@@ -672,7 +665,7 @@ new Vue({
             // }
 
             //tableName,dbName,payload,fields=null,where=null,limit =null,offset = null,desc =null,startTime=null,endTime=null
-            TaosRestful.selectData(this.surperTableName, this.theDB, payload, fields = this.surperTableFilter.fields,
+            this.clientFor(this.theLink).selectData(this.surperTableName, this.theDB, payload, fields = this.surperTableFilter.fields,
                 where = this.surperWhere, limit = this.eachPageSurperTable, offset = offsetVal,
                 desc = this.surperTorder, startTime = startTime, endTime = endTime)
                 .then(data => {
@@ -724,12 +717,7 @@ new Vue({
             }
 
             let offsetVal = (this.currentPageTable - 1) * this.eachPageTable
-            let payload = {
-                ip: this.theLink.host,
-                port: this.theLink.port,
-                user: this.theLink.user,
-                password: this.theLink.password
-            }
+            const payload = this.makePayload(this.theLink)
             this.loadingTable = true
 
             // if(!this.tableFilter.tableSearchText.trim()){
@@ -737,7 +725,7 @@ new Vue({
             // }
 
             //tableName,dbName,payload,fields=null,where=null,limit =null,offset = null,desc =null,startTime=null,endTime=null
-            TaosRestful.selectData(this.tableName, this.theDB, payload, fields = this.tableFilter.fields,
+            this.clientFor(this.theLink).selectData(this.tableName, this.theDB, payload, fields = this.tableFilter.fields,
                 where = this.tableWhere, limit = this.eachPageTable, offset = offsetVal,
                 desc = this.Torder, startTime = startTime, endTime = endTime)
                 .then(data => {
@@ -764,6 +752,9 @@ new Vue({
                             });
                         }
                     }
+                    else {
+                        this.$message({ message: data.msg || '查询失败', type: 'error', duration: 1500 })
+                    }
                     this.loadingTable = false
                 })
         },
@@ -780,7 +771,7 @@ new Vue({
         handleClickT(val) {
             if (val) {
                 this.clearTable()
-                this.tableName = val.table_name
+                this.tableName = val.table_name || val.device_path || val.name
                 this.selectTData(true)
             }
         },
@@ -796,16 +787,11 @@ new Vue({
         deleteSurperT(val) {
             this.$confirm('确认删除超级表' + val + "吗？")
                 .then(_ => {
-                    let payload = {
-                        ip: this.theLink.host,
-                        port: this.theLink.port,
-                        user: this.theLink.user,
-                        password: this.theLink.password
-                    }
+                    const payload = this.makePayload(this.theLink)
                     this.loadingSurperList = true
 
                     //TODO没测试过
-                    TaosRestful.dropTable(val, this.theDB, payload).then(data => {
+                    this.clientFor(this.theLink).dropTable(val, this.theDB, payload).then(data => {
 
                         if (data.res) {
                             //成功
@@ -831,18 +817,14 @@ new Vue({
             console.log(val)
         },
         deleteT(table_name) {
+            if (this.isIoTDBTree) return
             this.$confirm('确认删除表' + table_name + "吗？")
                 .then(_ => {
-                    let payload = {
-                        ip: this.theLink.host,
-                        port: this.theLink.port,
-                        user: this.theLink.user,
-                        password: this.theLink.password
-                    }
+                    const payload = this.makePayload(this.theLink)
                     this.loadingTableList = true
 
                     //TODO没测试过
-                    TaosRestful.dropTable(table_name, this.theDB, payload).then(data => {
+                    this.clientFor(this.theLink).dropTable(table_name, this.theDB, payload).then(data => {
 
                         if (data.res) {
                             //成功
@@ -864,13 +846,9 @@ new Vue({
                 })
         },
         sendSQL() {
-            let payload = {
-                ip: this.theLink.host,
-                port: this.theLink.port,
-                user: this.theLink.user,
-                password: this.theLink.password
-            }
-            TaosRestful.rawSql(this.consoleInput, payload).then(data => {
+            const payload = this.makePayload(this.theLink)
+            payload.database = this.theDB
+            this.clientFor(this.theLink).rawSql(this.consoleInput, payload, this.theDB).then(data => {
                 if (data.res) {
                     this.consoleResult = data
                 } else {
@@ -880,6 +858,24 @@ new Vue({
                         duration: 1000
                     });
                 }
+            })
+        },
+        inspectTable(row) {
+            const name = row.table_name || row.device_path || row.name
+            this.metadataDialog = true
+            this.metadataTitle = name
+            this.metadataRows = []
+            this.metadataColumns = []
+            this.loadingMetadata = true
+            this.clientFor(this.theLink).describeMetadata(name, this.theDB, this.makePayload(this.theLink)).then(result => {
+                if (result.res) {
+                    this.metadataRows = result.data
+                    this.metadataColumns = result.data.length ? Object.keys(result.data[0]) : []
+                } else {
+                    this.$message({ message: result.msg || '无法读取结构信息', type: 'error', duration: 2000 })
+                    this.metadataDialog = false
+                }
+                this.loadingMetadata = false
             })
         },
         closeSuperTdialog() {

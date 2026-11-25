@@ -26,6 +26,7 @@
                 <el-submenu :index="String(index)" :key="index" v-for="(link, index) in links">
                     <template slot="title">
                         <span>{{ link.name }}</span>
+                        <el-tag type="info" size="mini">{{ link.driver === 'iotdb' ? (link.model === 'table' ? 'IoTDB Table' : 'IoTDB Tree') : 'Native' }}</el-tag>
                         <el-tag type="success" size="mini" v-if="link.version">{{ link.version }}</el-tag>
                         <div class="iconWrapper3">
                             <img @click.stop="addDB(index)" class="icon1" src="./img/add.png">
@@ -48,20 +49,41 @@
     <!-- 新建连接的弹窗 -->
     <el-dialog :close-on-click-modal="false" :before-close="cancelAddLink" :visible.sync="addLinkDialog" :title="addOrEditTitle">
         <el-form :model="linkForm" :ref="linkForm" class="linkformstyle" label-width="80px">
+            <el-form-item label="数据库类型">
+                <el-radio-group v-model="linkForm.driver" @change="changeDriver" size="small">
+                    <el-radio-button native">Native</el-radio-button>
+                    <el-radio-button label="iotdb">Apache IoTDB</el-radio-button>
+                </el-radio-group>
+            </el-form-item>
+            <el-form-item v-if="linkForm.driver === 'iotdb'" label="数据模型">
+                <el-radio-group v-model="linkForm.model" size="small">
+                    <el-radio-button label="tree">Tree</el-radio-button>
+                    <el-radio-button label="table">Table</el-radio-button>
+                </el-radio-group>
+            </el-form-item>
             <el-form-item label="名称" prop="name">
                 <el-input v-model="linkForm.name"></el-input>
             </el-form-item>
-            <el-form-item label="Host" prop="host">
-                <el-input v-model="linkForm.host"></el-input>
+            <el-form-item label="协议" v-if="linkForm.driver === 'iotdb'">
+                <el-radio-group v-model="linkForm.protocol" size="small">
+                    <el-radio-button label="http">HTTP</el-radio-button>
+                    <el-radio-button label="https">HTTPS</el-radio-button>
+                </el-radio-group>
+            </el-form-item>
+            <el-form-item label="主机" prop="host">
+                <el-input v-model="linkForm.host" placeholder="主机名或 IP，不含协议与路径"></el-input>
             </el-form-item>
             <el-form-item label="Port" prop="port">
                 <el-input v-model="linkForm.port"></el-input>
             </el-form-item>
-            <el-form-item label="User" prop="user">
+            <el-form-item label="用户名" prop="user">
                 <el-input v-model="linkForm.user"></el-input>
             </el-form-item>
-            <el-form-item label="Password" prop="password">
+            <el-form-item label="密码" prop="password">
                 <el-input type="password" v-model="linkForm.password" show-password></el-input>
+            </el-form-item>
+            <el-form-item label="超时(秒)">
+                <el-input-number v-model="linkForm.timeout" :min="1" :max="120" controls-position="right"></el-input-number>
             </el-form-item>
         </el-form>
         <div slot="footer" class="dialog-footer">
@@ -72,12 +94,14 @@
     <!-- 添加数据库的弹窗 -->
     <el-dialog :visible.sync="addDBDialog" title="添加数据库">
         <el-form class="linkformstyle" label-width="130px" size="small">
-            <el-form-item label="名称" :rules="[
+            <el-form-item :label="addingIoTDB ? '数据库名' : '名称'" :rules="[
           { required: true, message: '名称不能为空'}
         ]">
-                <el-input v-model="addDBname" autocomplete="off" style="width: 85%"></el-input>
+                <el-input v-model="addDBname" autocomplete="off" style="width: 85%"
+                          :placeholder="addingIoTDBTree ? 'root.database 或 database' : ''"></el-input>
             </el-form-item>
-            <el-form-item>
+            <el-alert v-if="addingIoTDBTree" title="Tree 数据库使用 root.database 路径；输入 database 时会自动补上 root。" type="info" :closable="false" show-icon></el-alert>
+            <el-form-item v-if="!addingIoTDB">
                 <span slot="label">comp
                     <el-tooltip content="文件压缩度（可通过 alter database 修改）0：关闭，1：一阶段压缩，2：两阶段压缩。缺省值：2" placement="top-start">
                         <i class="el-icon-question"></i>
@@ -89,7 +113,7 @@
                     <el-option label="2" value="2"></el-option>
                 </el-select>
             </el-form-item>
-            <el-form-item>
+            <el-form-item v-if="!addingIoTDB">
                 <span slot="label">replica
                     <el-tooltip content="副本个数（可通过 alter database 修改）缺省值：1" placement="top-start">
                         <i class="el-icon-question"></i>
@@ -101,7 +125,7 @@
                     <el-option label="3" value="3"></el-option>
                 </el-select>
             </el-form-item>
-            <el-form-item>
+            <el-form-item v-if="!addingIoTDB">
                 <span slot="label">keep
                     <el-tooltip content="数据保留的天数（可通过 alter database 修改）单位：天，缺省值：3650" placement="top-start">
                         <i class="el-icon-question"></i>
@@ -110,7 +134,7 @@
                 <el-input-number v-model="addDBkeep" :min="1" :max="36500"
                                  controls-position="right" style="width: 85%"></el-input-number>
             </el-form-item>
-            <el-form-item>
+            <el-form-item v-if="!addingIoTDB">
                 <span slot="label">update
                     <el-tooltip content="更新数据行（不可通过 alter database 修改）0：不允许更新，1：允许整行更新，2：允许部分列更新。（2.1.7.0 版本开始此参数支持设为 2，在此之前取值只能是 [0, 1]）。2.0.8.0 版本之前，不支持此参数。缺省值：0" placement="top-start">
                         <i class="el-icon-question"></i>
@@ -122,7 +146,7 @@
                     <el-option label="2" value="2"></el-option>
                 </el-select>
             </el-form-item>
-            <el-form-item>
+            <el-form-item v-if="!addingIoTDB">
                 <span slot="label">quorum
                     <el-tooltip content="写入确认数（可通过 alter database 修改）即：多副本环境下指令执行的确认数要求。缺省值：1" placement="top-start">
                         <i class="el-icon-question"></i>
@@ -133,7 +157,7 @@
                     <el-option label="2" value="2"></el-option>
                 </el-select>
             </el-form-item>
-            <el-form-item>
+            <el-form-item v-if="!addingIoTDB">
                 <span slot="label">blocks
                     <el-tooltip content="内存块大小（可通过 alter database 修改）即：每个 vnode（tsdb）中有多少 cache 大小的内存块。缺省值：6" placement="top-start">
                         <i class="el-icon-question"></i>
@@ -147,10 +171,15 @@
             <el-button type="primary" @click="postaddDB" size="medium">确 定</el-button>
         </div>
     </el-dialog>
+    <el-dialog :title="'结构与属性: ' + metadataTitle" :visible.sync="metadataDialog" width="72%">
+        <el-table v-loading="loadingMetadata" :data="metadataRows" size="mini" border max-height="420">
+            <el-table-column v-for="column in metadataColumns" :key="column" :prop="column" :label="column" show-overflow-tooltip></el-table-column>
+        </el-table>
+    </el-dialog>
     <el-container class="main">
         <el-container class="mainContent">
             <el-tabs v-model="activeTab" type="border-card" class="mainTab" @tab-click="handleSwichTab">
-                <el-tab-pane label="超级表" class="tablePage" name="1">
+                <el-tab-pane v-if="!isIoTDB" label="超级表" class="tablePage" name="1">
                     <el-container class="tableWrapper">
                         <el-aside class="mainAside" width="200px">
                             <div v-loading="loadingSurperList">
@@ -336,7 +365,7 @@
                         </el-main>
                     </el-container>
                 </el-tab-pane>
-                <el-tab-pane label="普通表" class="tablePage" name="2">
+                <el-tab-pane :label="isIoTDBTree ? '设备' : (isIoTDB ? '表' : '普通表')" class="tablePage" name="2">
                     <el-container class="tableWrapper">
                         <el-aside class="mainAside" width="200px">
                             <div v-loading="loadingTableList">
@@ -348,11 +377,11 @@
                                         @current-change="handleClickT"
                                         style="width: 100%">
                                     <el-table-column
-                                            label="普通表名"
+                                            :label="isIoTDBTree ? '设备路径' : (isIoTDB ? '表名' : '普通表名')"
                                             width="190"
                                             show-overflow-tooltip>
                                         <template slot="header" slot-scope="scope">
-                                            <span>普通表名</span>
+                                            <span>{{ isIoTDBTree ? '设备路径' : (isIoTDB ? '表名' : '普通表名') }}</span>
                                             <div class="iconWrapper">
                                                 <div class="iconWrapper_ " @click="Tdialog=true">
                                                     <img class="icon1" v-if="searchIcon"
@@ -370,10 +399,13 @@
                                         </template>
                                         <template slot-scope="scope">
                                             <img class="icon1" src="./img/file.png">
-                                            <span class="surperTables">{{ scope.row.table_name }}</span>
+                                            <span class="surperTables">{{ scope.row.table_name || scope.row.name }}</span>
                                             <div class="iconWrapper2">
+                                                <el-tooltip v-if="isIoTDB" content="查看结构与属性" placement="top">
+                                                    <el-button type="text" icon="el-icon-tickets" size="mini" @click.stop="inspectTable(scope.row)"></el-button>
+                                                </el-tooltip>
                                                 <!-- <img class="icon1" @click="editT" src="./img/edit.png"> -->
-                                                <img class="icon1" @click.stop="deleteT(scope.row.table_name)"
+                                                <img v-if="!isIoTDBTree" class="icon1" @click.stop="deleteT(scope.row.table_name)"
                                                      src="./img/delete.png">
                                             </div>
                                         </template>
@@ -533,7 +565,7 @@
                         </div>
                     </div>
                 </el-tab-pane>
-                <el-tab-pane label="当前库属性" name="4"><p v-html='dbInfo'></p></el-tab-pane>
+                <el-tab-pane :label="isIoTDB ? '模型信息' : '当前库属性'" name="4"><p v-html='dbInfo'></p></el-tab-pane>
             </el-tabs>
 
         </el-container>
